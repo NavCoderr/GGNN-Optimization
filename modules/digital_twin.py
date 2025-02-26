@@ -93,3 +93,4 @@ if __name__ == "__main__":
 
     for agv in twin["agvs"]:
         print(f"AGV {agv['id']} - Final Position: {agv['position']}, Battery: {agv['battery']:.2f}%, Charging: {agv['charging']}")
+
