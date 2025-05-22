@@ -3,82 +3,152 @@ import networkx as nx
 from modules.warehouse import create_warehouse_graph
 from modules.mes import generate_mes_tasks, fetch_dynamic_tasks
 from modules.tms import fetch_real_time_routes
-from modules.congestion_management import update_congestion
+from modules.congestion_management import update_congestion, decay_congestion
 from modules.energy_optimization import compute_energy_cost
 
-def simulate_digital_twin(num_cycles=500, num_agvs=50, experiment_type="dynamic"):
+
+def simulate_digital_twin(
+    num_cycles=2000,
+    num_agvs=50,
+    experiment_type="dynamic",
+    seed=42
+):
+    """
+    Simulate a digital twin of the warehouse for AGV movements.
+    - num_cycles: number of time steps to run (e.g., 2000)
+    - num_agvs: fleet size (e.g., 50)
+    - experiment_type: "static", "dynamic", "obstacle", or "scalability"
+    - seed: random seed for reproducibility
+    Returns:
+      dict with keys: warehouse_graph, mes_tasks, tms_routes, agvs
+    """
+    # Reproducibility
+    random.seed(seed)
+
+    # 1) Create warehouse graph
     warehouse_graph = create_warehouse_graph()
     valid_nodes = list(warehouse_graph.nodes)
-
     if len(valid_nodes) < 2:
-        raise ValueError("Digital Twin Failed: No valid nodes available in the warehouse graph!")
+        raise ValueError("Not enough nodes generated in warehouse_graph.")
 
+    # 2) Fetch MES tasks
     if experiment_type == "static":
-        mes_tasks = generate_mes_tasks(num_tasks=100, valid_nodes=valid_nodes, warehouse_graph=warehouse_graph)
+        mes_tasks = generate_mes_tasks(
+            num_tasks=num_agvs,
+            valid_nodes=valid_nodes,
+            warehouse_graph=warehouse_graph,
+            seed=seed
+        )
     else:
-        mes_tasks = fetch_dynamic_tasks(current_workload=10, warehouse_graph=warehouse_graph)
+        mes_tasks = fetch_dynamic_tasks(
+            current_workload=num_agvs,
+            warehouse_graph=warehouse_graph,
+            seed=seed
+        )
 
-    tms_routes = fetch_real_time_routes(warehouse_graph, mes_workload=15)
+    # 3) Fetch TMS routes
+    tms_routes = fetch_real_time_routes(
+        warehouse_graph,
+        mes_workload=num_agvs,
+        num_routes=num_agvs
+    )
 
-    agvs = [
-        {
+    # 4) Initialize AGV fleet state
+    agvs = []
+    for i in range(num_agvs):
+        agvs.append({
             "id": i,
             "position": random.choice(valid_nodes),
-            "battery": 100,
+            "battery": 100.0,
             "task": None,
-            "charging": False
-        }
-        for i in range(num_agvs)
-    ]
+            "charging": False,
+            "move_count": 0,
+            "energy_consumed": 0.0,
+            "completed_tasks": 0,
+            "reroute_count": 0,
+            "waiting_cycles": 0
+        })
 
+    # 5) Main simulation loop
     for cycle in range(num_cycles):
         for agv in agvs:
+            # Recharge if at charging station
             if agv["charging"]:
-                agv["battery"] = min(100, agv["battery"] + 10)
-                if agv["battery"] == 100:
+                agv["battery"] = min(100.0, agv["battery"] + 10.0)
+                if agv["battery"] >= 100.0:
                     agv["charging"] = False
                 continue
 
-            if not agv["task"]:
+            # Assign new task if none
+            if agv["task"] is None:
                 if experiment_type == "static":
                     start, end = random.sample(valid_nodes, 2)
-                    new_task = [(start, end)]
                 else:
-                    new_task = fetch_dynamic_tasks(current_workload=1, warehouse_graph=warehouse_graph)
+                    dt = fetch_dynamic_tasks(
+                        current_workload=num_agvs,
+                        warehouse_graph=warehouse_graph,
+                        seed=seed + cycle + agv["id"]
+                    )
+                    t0 = dt[0]
+                    start = t0[0] if isinstance(t0, tuple) else t0["start_node"]
+                    end   = t0[1] if isinstance(t0, tuple) else t0["end_node"]
+                agv["task"] = (start, end)
 
-                if not new_task:
-                    continue
-
-                first_task = new_task[0]
-                if isinstance(first_task, tuple) and len(first_task) == 2:
-                    agv["task"] = first_task
-                elif isinstance(first_task, dict) and "start_node" in first_task and "end_node" in first_task:
-                    agv["task"] = (first_task["start_node"], first_task["end_node"])
-                else:
-                    continue
-
+            # Execute current task
             start, end = agv["task"]
-
             if agv["position"] != end:
                 try:
-                    path = nx.shortest_path(warehouse_graph, source=agv["position"], target=end, weight="weight")
+                    path = nx.shortest_path(
+                        warehouse_graph,
+                        source=agv["position"],
+                        target=end,
+                        weight="weight"
+                    )
                     if len(path) > 1:
-                        agv["position"] = path[1]
+                        next_pos = path[1]
+                        cost = compute_energy_cost(
+                            warehouse_graph,
+                            agv["position"],
+                            next_pos
+                        )
+                        # Update AGV state
+                        agv["position"] = next_pos
+                        agv["move_count"] += 1
+                        agv["energy_consumed"] += cost
+                        agv["battery"] = max(0.0, agv["battery"] - cost)
+                        update_congestion(warehouse_graph, next_pos)
+                    else:
+                        agv["waiting_cycles"] += 1
                 except nx.NetworkXNoPath:
+                    agv["reroute_count"] += 1
                     agv["task"] = None
-                continue
+            else:
+                # Task completed
+                agv["completed_tasks"] += 1
+                agv["task"] = None
+                update_congestion(warehouse_graph, agv["position"])
 
-            update_congestion(warehouse_graph, agv["position"])
-            energy_cost = compute_energy_cost(warehouse_graph, start, agv["position"])
-            agv["battery"] = max(0, agv["battery"] - energy_cost)
+            # If battery low, go to charging station
+            if agv["battery"] < 20.0:
+                stations = [n for n in valid_nodes if warehouse_graph.nodes[n].get("type") == "charging_station"]
+                if stations:
+                    try:
+                        nearest = min(
+                            stations,
+                            key=lambda s: nx.shortest_path_length(
+                                warehouse_graph,
+                                source=agv["position"],
+                                target=s,
+                                weight="weight"
+                            )
+                        )
+                        agv["position"] = nearest
+                        agv["charging"] = True
+                    except nx.NetworkXNoPath:
+                        pass
 
-            if agv["battery"] <= 5:
-                charging_stations = [node for node in valid_nodes if warehouse_graph.nodes[node].get("type") == "charging_station"]
-                if charging_stations:
-                    agv["position"] = random.choice(charging_stations)
-                    agv["charging"] = True
-                else:
-                    agv["task"] = None
+        # Decay congestion globally
+        decay_congestion(warehouse_graph)
 
     return {
         "warehouse_graph": warehouse_graph,
@@ -86,11 +156,3 @@ def simulate_digital_twin(num_cycles=500, num_agvs=50, experiment_type="dynamic"
         "tms_routes": tms_routes,
         "agvs": agvs
     }
-
-if __name__ == "__main__":
-    twin = simulate_digital_twin(num_cycles=500, num_agvs=50, experiment_type="dynamic")
-    print(f"Digital Twin Initialized with {len(twin['agvs'])} AGVs.")
-
-    for agv in twin["agvs"]:
-        print(f"AGV {agv['id']} - Final Position: {agv['position']}, Battery: {agv['battery']:.2f}%, Charging: {agv['charging']}")
-
