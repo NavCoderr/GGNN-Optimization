@@ -1,54 +1,38 @@
 import networkx as nx
-import random
-from modules.warehouse import create_warehouse_graph
+from heapq import heappop, heappush
+from loguru import logger
 from modules.congestion_management import get_congestion_level
 from modules.energy_optimization import compute_energy_cost
-from heapq import heappop, heappush   
 
-def bfs_path(G, start, goal):
-     
-    
+def bfs_path(G: nx.DiGraph, start: int, goal: int) -> list:
     if start not in G or goal not in G:
-        print(f"Error: Start ({start}) or Goal ({goal}) node does not exist.")
-        return None
+        logger.error(f"Invalid nodes for BFS: start={start}, goal={goal}")
+        return []
 
-    try:
-        queue = [(0, start, [start])]  # (Total Cost, Current Node, Path)
-        visited = set()
+    visited = set()
+    heap = [(0.0, start, [start])]
 
-        while queue:
-            total_cost, current, path = heappop(queue)  # Always explore the lowest-cost path first
-
-            if current == goal:
-                return path  # Return the first valid path found
-
-            if current in visited:
+    while heap:
+        cost, node, path = heappop(heap)
+        if node == goal:
+            return path
+        if node in visited:
+            continue
+        visited.add(node)
+        for nbr in G.neighbors(node):
+            if nbr in visited:
                 continue
-            visited.add(current)  # Mark as visited immediately
+            base = G[node][nbr].get('weight', 1.0)
+            cong = get_congestion_level(G, nbr) * 5.0
+            energy = compute_energy_cost(G, node, nbr)
+            total = cost + base + cong + energy
+            heappush(heap, (total, nbr, path + [nbr]))
 
-            for neighbor in G.neighbors(current):
-                if neighbor in visited:
-                    continue
+    logger.error(f"No BFS path from {start} to {goal}")
+    return []
 
-                congestion_penalty = get_congestion_level(G, neighbor) * random.uniform(2, 6)
-                energy_cost = compute_energy_cost(G, current, neighbor)
-                weight = G[current][neighbor]["weight"] + congestion_penalty + energy_cost
-
-                heappush(queue, (total_cost + weight, neighbor, path + [neighbor]))  # Push into priority queue
-
-        print(f"No path found between {start} and {goal}.")
-        return None
-
-    except nx.NetworkXNoPath:
-        print(f"No path found between {start} and {goal}.")
-        return None
-
-
-# Run BFS pathfinding if executed as a script
-if __name__ == "__main__":
-    G = create_warehouse_graph()
-    start, goal = 0, 49
-
-    path = bfs_path(G, start, goal)
-    print("BFS Path:", path if path else "No valid path found.")
-
+if __name__ == '__main__':
+    from modules.warehouse import create_warehouse_graph
+    G = create_warehouse_graph(seed=42)
+    path = bfs_path(G, 0, max(G.nodes))
+    logger.info(f"BFS path: {path}")
