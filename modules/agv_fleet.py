@@ -14,83 +14,76 @@ class AGV:
         self.completed_tasks = 0
         self.total_distance_traveled = 0
         self.reroute_count = 0
-        self.energy_consumed = 0
+        self.energy_consumed = 0.0
         self.waiting_cycles = 0
         self.charging = False
 
     def _get_valid_start_node(self):
-        valid_nodes = [n for n in self.warehouse_graph.nodes if nx.degree(self.warehouse_graph, n) > 1]
-        return random.choice(valid_nodes) if valid_nodes else 0  
+        valid = [n for n in self.warehouse_graph.nodes if nx.degree(self.warehouse_graph, n) > 1]
+        return random.choice(valid) if valid else 0
 
     def assign_task(self, task):
         if not task or not isinstance(task, tuple) or len(task) != 2:
             return
-        
         start, goal = task
         if nx.has_path(self.warehouse_graph, start, goal):
-            self.current_task = {"start": start, "goal": goal}
+            self.current_task = {'start': start, 'goal': goal}
 
     def move(self, path_algorithm):
         if not self.current_task:
-            return
-
-        start, goal = self.current_task["start"], self.current_task["goal"]
-
+            return True
+        start = self.current_task['start']
+        goal  = self.current_task['goal']
         if self.position == goal:
             self.completed_tasks += 1
             self.current_task = None
-            return
-
+            return True
         if not nx.has_path(self.warehouse_graph, self.position, goal):
             self.reroute()
-            return
-
-        new_path = path_algorithm(self.warehouse_graph, self.position, goal)
-        if new_path and len(new_path) > 1:
-            next_position = new_path[1]
-            energy_cost = compute_energy_cost(self.warehouse_graph, start, next_position)
-
-            if energy_cost < 0 or energy_cost > 100:
-                energy_cost = max(0.1, min(energy_cost, 5))  
-
-            self.position = next_position
+            return False
+        path = path_algorithm(self.warehouse_graph, self.position, goal)
+        if path and len(path) > 1:
+            nxt = path[1]
+            cost = compute_energy_cost(self.warehouse_graph, self.position, nxt)
+            cost = max(0.1, min(cost, 5.0))
+            self.position = nxt
             self.total_distance_traveled += 1
-            self.energy_consumed += energy_cost
-            self.battery = max(0, self.battery - energy_cost)  
-            update_congestion(self.warehouse_graph, next_position)
+            self.energy_consumed += cost
+            self.battery = max(0.0, self.battery - cost)
+            update_congestion(self.warehouse_graph, nxt)
+            if self.battery < 20.0:
+                self.recharge_battery()
+            return True
         else:
             self.waiting_cycles += 1
-
-        if self.battery < 20:
-            self.recharge_battery()
+            return False
 
     def reroute(self):
-        alternative_algorithms = [nx.astar_path, nx.dijkstra_path]
-        for algo in alternative_algorithms:
+        for algo in [nx.astar_path, nx.dijkstra_path]:
             try:
-                new_path = algo(self.warehouse_graph, self.position, self.current_task["goal"])
+                new_path = algo(self.warehouse_graph, self.position, self.current_task['goal'])
                 if new_path and len(new_path) > 1:
                     self.position = new_path[1]
                     self.reroute_count += 1
                     return
             except nx.NetworkXNoPath:
                 continue
-        
         self.waiting_cycles += 1
 
     def recharge_battery(self):
-        charging_stations = [node for node in self.warehouse_graph.nodes if self.warehouse_graph.nodes[node].get("type") == "charging_station"]
-        
-        if not charging_stations:
+        stations = [n for n in self.warehouse_graph.nodes if self.warehouse_graph.nodes[n].get('type') == 'charging_station']
+        if not stations:
             return
-        
         try:
-            nearest_station = min(charging_stations, key=lambda s: nx.shortest_path_length(self.warehouse_graph, self.position, s, weight="weight"))
-            self.position = nearest_station
+            nearest = min(
+                stations,
+                key=lambda s: nx.shortest_path_length(self.warehouse_graph, self.position, s, weight='weight')
+            )
+            self.position = nearest
             self.charging = True
-            self.battery = min(100, self.battery + 50)  
+            self.battery = min(100.0, self.battery + 50.0)
         except nx.NetworkXNoPath:
-            return
+            pass
 
 class AGV_Fleet:
     def __init__(self, warehouse_graph, num_agvs=3):
@@ -98,13 +91,11 @@ class AGV_Fleet:
         self.agvs = [AGV(i, warehouse_graph) for i in range(num_agvs)]
 
     def assign_tasks(self, tasks):
-        unique_tasks = list(set(tasks))  
-        random.shuffle(unique_tasks)
-
+        unique = list(set(tasks))
+        random.shuffle(unique)
         for agv in self.agvs:
-            if unique_tasks:
-                task = unique_tasks.pop(0)
-                agv.assign_task(task)
+            if unique:
+                agv.assign_task(unique.pop(0))
 
     def move_fleet(self, path_algorithm):
         for agv in self.agvs:
@@ -112,16 +103,13 @@ class AGV_Fleet:
 
     def status_report(self):
         for agv in self.agvs:
-            print(f"AGV {agv.id} - Position: {agv.position}, Battery: {agv.battery:.2f}%, Tasks Completed: {agv.completed_tasks}")
+            print(f"AGV {agv.id} - Pos: {agv.position}, Bat: {agv.battery:.1f}%, Done: {agv.completed_tasks}")
 
 if __name__ == "__main__":
     from modules.warehouse import create_warehouse_graph
-
-    warehouse_graph = create_warehouse_graph(num_nodes=500, num_edges=2000)
-    agv_fleet = AGV_Fleet(warehouse_graph, num_agvs=3)
-
-    tasks = [(random.randint(0, 499), random.randint(0, 499)) for _ in range(5)]
-    agv_fleet.assign_tasks(tasks)
-
-    agv_fleet.move_fleet(nx.dijkstra_path)
-    agv_fleet.status_report()
+    G = create_warehouse_graph(seed=42)
+    fleet = AGV_Fleet(G, num_agvs=3)
+    tasks = [(random.randint(0,499), random.randint(0,499)) for _ in range(5)]
+    fleet.assign_tasks(tasks)
+    fleet.move_fleet(nx.dijkstra_path)
+    fleet.status_report()
