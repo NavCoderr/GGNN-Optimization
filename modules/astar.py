@@ -1,62 +1,53 @@
-import networkx as nx
 import heapq
-import random  
-from modules.warehouse import create_warehouse_graph
+import networkx as nx
+from loguru import logger
 from modules.congestion_management import get_congestion_level
 from modules.energy_optimization import compute_energy_cost
 
-def astar_path(G, start, goal):
-     
-
-    def heuristic(node1, node2):
-         
+def astar_path(G: nx.DiGraph, start: int, goal: int) -> list:
+    def heuristic(u: int, v: int) -> float:
         try:
-            return nx.shortest_path_length(G, node1, node2, weight="weight") * 0.8  # Estimate based on warehouse layout
-        except nx.NetworkXNoPath:
-            return float('inf')  # Avoid incorrect estimates
+            return nx.shortest_path_length(G, u, v, weight='weight') * 0.8
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            return float('inf')
 
     if start not in G or goal not in G:
-        print(f"Error: Start ({start}) or Goal ({goal}) node does not exist.")
-        return None
+        logger.error(f"Invalid start/goal for A*: {start}, {goal}")
+        return []
 
-    open_set = []
-    heapq.heappush(open_set, (0, start))
+    open_set = [(heuristic(start, goal), start)]
     came_from = {}
-    g_score = {node: float('inf') for node in G.nodes}
-    g_score[start] = 0
-    f_score = {node: float('inf') for node in G.nodes}
-    f_score[start] = heuristic(start, goal)
+    g_score = {n: float('inf') for n in G.nodes}
+    g_score[start] = 0.0
 
     while open_set:
         _, current = heapq.heappop(open_set)
-
         if current == goal:
             path = []
             while current in came_from:
                 path.append(current)
                 current = came_from[current]
             path.append(start)
-            return path[::-1]  # Return the path from start to goal
+            return path[::-1]
 
-        for neighbor in G.neighbors(current):
-            congestion_penalty = get_congestion_level(G, neighbor) * random.uniform(3, 7)  # Adaptive penalty
-            energy_cost = compute_energy_cost(G, current, neighbor)
-            weight = G[current][neighbor].get('weight', 1.0) + congestion_penalty + energy_cost  # Ensure weight exists
+        for nbr in G.neighbors(current):
+            base = G[current][nbr].get('weight', 1.0)
+            penalty = get_congestion_level(G, nbr) * 5.0
+            energy = compute_energy_cost(G, current, nbr)
+            cost = base + penalty + energy
+            tentative = g_score[current] + cost
 
-            tentative_g_score = g_score[current] + weight
-            if tentative_g_score < g_score[neighbor]:
-                came_from[neighbor] = current
-                g_score[neighbor] = tentative_g_score
-                f_score[neighbor] = tentative_g_score + heuristic(neighbor, goal)
-                heapq.heappush(open_set, (f_score[neighbor], neighbor))
+            if tentative < g_score[nbr]:
+                came_from[nbr] = current
+                g_score[nbr] = tentative
+                f = tentative + heuristic(nbr, goal)
+                heapq.heappush(open_set, (f, nbr))
 
-    print(f"No path found between {start} and {goal}.")
-    return None  # No path found
+    logger.error(f"A* failed to find a path from {start} to {goal}")
+    return []
 
-# Run A* pathfinding if executed as a script
-if __name__ == "__main__":
-    G = create_warehouse_graph()
-    start, goal = 0, 49  # Example start and goal
-
-    path = astar_path(G, start, goal)
-    print("A* Path:", path if path else "No valid path found.")
+if __name__ == '__main__':
+    from modules.warehouse import create_warehouse_graph
+    G = create_warehouse_graph(seed=42)
+    path = astar_path(G, 0, max(G.nodes))
+    logger.info(f"A* path: {path}")
