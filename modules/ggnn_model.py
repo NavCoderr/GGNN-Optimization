@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -23,15 +24,6 @@ class GGNN(nn.Module):
         return torch.clamp(self.fc(x), min=0.01, max=1.0)
 
 def compute_target_values(graph, data):
-    """
-    Compute per-node target scores based on:
-      - neighbor energy costs
-      - edge congestion
-      - edge urgency
-      - blocked-edge penalties
-      - task priority
-    Returns a tensor of shape [num_nodes, 1].
-    """
     targets = []
     N = data.x.shape[0]
     for node in range(N):
@@ -39,7 +31,6 @@ def compute_target_values(graph, data):
             targets.append(0.0)
             continue
 
-        # priority weight
         priority = graph.nodes[node].get("priority", "medium").lower()
         pw = {"high": 1.0, "medium": 0.5, "low": 0.2}.get(priority, 0.5)
 
@@ -48,7 +39,6 @@ def compute_target_values(graph, data):
             targets.append(0.0)
             continue
 
-        # aggregate metrics over edges
         total_energy = 0.0
         total_cong = 0.0
         total_urg = 0.0
@@ -61,7 +51,6 @@ def compute_target_values(graph, data):
                 blocked_count += 1
 
         avg_cong = total_cong / len(neighbors)
-        # Combine: higher energy, congestion, urgency, blocked edges reduce value
         value = pw / (1.0 + 0.5 * total_energy + 2.0 * avg_cong + 1.0 * total_urg + 5.0 * blocked_count)
         targets.append(value)
 
@@ -93,10 +82,6 @@ def validate_ggnn(model, data, graph):
     return path
 
 def train_ggnn(model, data, graph, epochs=2000, lr=1e-3, weight_decay=1e-5, step_size=300, gamma=0.5):
-    """
-    Train the GGNN with MSE loss against compute_target_values,
-    using a StepLR scheduler.
-    """
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
     loss_fn = nn.MSELoss()
@@ -124,11 +109,6 @@ def train_ggnn(model, data, graph, epochs=2000, lr=1e-3, weight_decay=1e-5, step
         f.write("\n".join(str(v) for v in log))
 
 def train_ggnn_on_movements(model, movement_csv_path, graph, epochs=100):
-    """
-    Train the GGNN using real AGV movement records:
-      movement_csv_path: path to movements.csv
-      graph: the warehouse graph
-    """
     df = pd.read_csv(movement_csv_path)
     samples = list(zip(df['from_node'], df['to_node'], df['energy_used']))
     print(f"[INFO] Training GGNN on {len(samples)} movement records")
@@ -138,14 +118,11 @@ def train_ggnn_on_movements(model, movement_csv_path, graph, epochs=100):
     for ep in range(1, epochs + 1):
         total_loss = 0.0
         for u, v, y in samples:
-            # create one-hot feature vector for node u
             x = torch.zeros(graph.number_of_nodes(), model.fc.in_features)
             x[u] = 1.0
-            # build edge_index tensor
             edge_index = torch.tensor(list(graph.edges)).t().contiguous()
-            # forward and ensure matching shapes
-            pred   = model(x, edge_index)[v].view(1)         # shape [1]
-            target = torch.tensor([y], dtype=torch.float32) # shape [1]
+            pred = model(x, edge_index)[v].view(1)
+            target = torch.tensor([y], dtype=torch.float32)
             loss = loss_fn(pred, target)
             optimizer.zero_grad()
             loss.backward()
@@ -158,12 +135,10 @@ if __name__ == "__main__":
     G = create_warehouse_graph(seed=42)
     data = convert_to_pyg_data(G)
     model = GGNN(data.x.shape[1], hidden_dim=32, num_layers=4)
-    # original graph-based training
     train_ggnn(model, data, G)
-    # now train on real movement data
     train_ggnn_on_movements(model, "movements.csv", G, epochs=100)
     final_path = validate_ggnn(model, data, G)
     if final_path:
         logger.info(f"Final GGNN path: {final_path}")
     else:
-        logger.warning("No valid GGNN path found")0
+        logger.warning("No valid GGNN path found")
