@@ -1,53 +1,117 @@
 import random
+import math
 import networkx as nx
 
-def create_warehouse_graph(num_nodes=500, num_charging=10, num_rest=20, num_obstacles=30, num_edges=2000, seed=None):
+def create_warehouse_graph(
+    num_nodes=500,
+    num_charging=10,
+    num_rest=20,
+    num_obstacles=30,
+    num_edges=2000,
+    seed=None
+):
+    """
+    Build a directed warehouse graph with:
+      - random node positions (x,y) in [0,100]²
+      - node attributes: pos, congestion=0.0, task_priority, type
+      - num_edges randomly connected edges with physical lengths
+      - charging stations, rest stations, and obstacle nodes
+    """
     if seed is not None:
         random.seed(seed)
+
     G = nx.DiGraph()
+
+    # 1) Create nodes with random positions
     for i in range(num_nodes):
+        pos = (random.uniform(0, 100), random.uniform(0, 100))
         G.add_node(i,
-                   congestion=random.uniform(0,1),
-                   energy_cost=random.uniform(1,10),
-                   task_priority=random.choice(["Low","Medium","High"]))
+                   pos=pos,
+                   congestion=0.0,
+                   task_priority=random.choice(["Low", "Medium", "High"]),
+                   type="normal")
+
+    # 2) Add random directed edges with physical length & weight=length
     _connect_nodes(G, num_nodes, num_edges)
-    charging = random.sample(range(num_nodes), min(num_charging,num_nodes))
+
+    # 3) Assign charging stations
+    charging = random.sample(range(num_nodes), min(num_charging, num_nodes))
     for n in charging:
         G.nodes[n]['type'] = 'charging_station'
-    rest = random.sample([n for n in range(num_nodes) if n not in charging], min(num_rest,num_nodes))
+
+    # 4) Assign rest stations
+    normals = [n for n, d in G.nodes(data=True) if d['type'] == 'normal']
+    rest = random.sample(normals, min(num_rest, len(normals)))
     for n in rest:
         G.nodes[n]['type'] = 'rest_station'
+
+    # 5) Place obstacle nodes (ensuring connectivity)
     _place_obstacles(G, num_obstacles)
+
     return G
 
-def _connect_nodes(G, num_nodes, num_edges):
-    for _ in range(num_edges):
-        u,v = random.sample(range(num_nodes),2)
-        if not G.has_edge(u,v):
-            w = random.uniform(1,5)*(1+random.uniform(0,0.5))
-            G.add_edge(u,v,weight=w)
-    for n in range(num_nodes):
-        if len(list(G.neighbors(n)))==0:
-            t = random.choice([m for m in G.nodes if m!=n])
-            G.add_edge(n,t,weight=random.uniform(1,5))
-        if len(list(G.predecessors(n)))==0:
-            s = random.choice([m for m in G.nodes if m!=n])
-            G.add_edge(s,n,weight=random.uniform(1,5))
-    comps = list(nx.strongly_connected_components(G))
-    if comps:
-        largest = max(comps,key=len)
-        isolated = set(G.nodes)-largest
-        for n in isolated:
-            t = random.choice(list(largest))
-            G.add_edge(n,t,weight=random.uniform(1,5))
-            G.add_edge(t,n,weight=random.uniform(1,5))
 
-def _place_obstacles(G, num_obstacles):
-    valid = [n for n in G.nodes if 'type' not in G.nodes[n]]
-    for _ in range(min(len(valid),num_obstacles)):
-        n = random.choice(valid)
+def _connect_nodes(G: nx.DiGraph, num_nodes: int, num_edges: int) -> None:
+    """
+    Add num_edges random directed edges. Then ensure every node
+    has at least one in-edge and one out-edge, and the graph is strongly connected.
+    """
+    def add_edge(u: int, v: int):
+        pos_u = G.nodes[u]['pos']
+        pos_v = G.nodes[v]['pos']
+        length = math.hypot(pos_u[0] - pos_v[0], pos_u[1] - pos_v[1])
+        G.add_edge(u, v,
+                   weight=length,    # use physical length as weight
+                   length=length,    # physical distance in meters
+                   congestion=0.0,   # initial edge congestion
+                   urgency=0)        # initial edge urgency
+
+    # 2a) Random edges
+    edges_added = 0
+    while edges_added < num_edges:
+        u, v = random.sample(range(num_nodes), 2)
+        if not G.has_edge(u, v):
+            add_edge(u, v)
+            edges_added += 1
+
+    # 2b) Guarantee every node has out-degree ≥1 and in-degree ≥1
+    for n in range(num_nodes):
+        if G.out_degree(n) == 0:
+            m = random.choice([m for m in G.nodes if m != n])
+            add_edge(n, m)
+        if G.in_degree(n) == 0:
+            m = random.choice([m for m in G.nodes if m != n])
+            add_edge(m, n)
+
+    # 2c) Strong connectivity: connect isolated components
+    comps = list(nx.strongly_connected_components(G))
+    if len(comps) > 1:
+        main = max(comps, key=len)
+        for comp in comps:
+            if comp is main:
+                continue
+            # connect one node from comp to one in main, and vice versa
+            u = random.choice(list(comp))
+            v = random.choice(list(main))
+            add_edge(u, v)
+            add_edge(v, u)
+
+
+def _place_obstacles(G: nx.DiGraph, num_obstacles: int) -> None:
+    """
+    Randomly mark up to num_obstacles nodes as 'obstacle', but revert
+    if that breaks strong connectivity.
+    """
+    candidates = [n for n, d in G.nodes(data=True) if d['type'] == 'normal']
+    random.shuffle(candidates)
+    placed = 0
+
+    for n in candidates:
+        if placed >= num_obstacles:
+            break
         G.nodes[n]['type'] = 'obstacle'
-        if not nx.is_strongly_connected(G):
-            del G.nodes[n]['type']
+        if nx.is_strongly_connected(G):
+            placed += 1
         else:
-            valid.remove(n)
+            # revert if graph becomes disconnected
+            G.nodes[n]['type'] = 'normal'
