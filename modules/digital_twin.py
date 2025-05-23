@@ -1,158 +1,147 @@
+# -*- coding: utf-8 -*-
+
 import random
 import networkx as nx
+import pandas as pd
 from modules.warehouse import create_warehouse_graph
 from modules.mes import generate_mes_tasks, fetch_dynamic_tasks
 from modules.tms import fetch_real_time_routes
 from modules.congestion_management import update_congestion, decay_congestion
 from modules.energy_optimization import compute_energy_cost
+from modules.real_time_adaptation import adapt_to_real_time_conditions
+from modules.agv_fleet import AGV_Fleet
 
+def update_edge_urgency(G, fleet):
+    # reset urgencies
+    for u, v in G.edges:
+        G.edges[u, v]['urgency'] = 0
+    # increment along each AGV's current path
+    for agv in fleet.agvs:
+        task = agv.current_task
+        if task:
+            try:
+                path = nx.shortest_path(G, task['start'], task['goal'], weight='weight')
+                for a, b in zip(path, path[1:]):
+                    G.edges[a, b]['urgency'] += 1
+            except nx.NetworkXNoPath:
+                pass
 
 def simulate_digital_twin(
     num_cycles=2000,
     num_agvs=50,
     experiment_type="dynamic",
-    seed=42
+    seed=42,
+    export_movements=False,
+    export_path="movements.csv"
 ):
-    """
-    Simulate a digital twin of the warehouse for AGV movements.
-    - num_cycles: number of time steps to run (e.g., 2000)
-    - num_agvs: fleet size (e.g., 50)
-    - experiment_type: "static", "dynamic", "obstacle", or "scalability"
-    - seed: random seed for reproducibility
-    Returns:
-      dict with keys: warehouse_graph, mes_tasks, tms_routes, agvs
-    """
-    # Reproducibility
     random.seed(seed)
 
-    # 1) Create warehouse graph
-    warehouse_graph = create_warehouse_graph()
-    valid_nodes = list(warehouse_graph.nodes)
-    if len(valid_nodes) < 2:
-        raise ValueError("Not enough nodes generated in warehouse_graph.")
+    # 1) build warehouse graph & init urgencies
+    G = create_warehouse_graph(seed=seed)
+    for u, v in G.edges:
+        G.edges[u, v]['urgency'] = 0
 
-    # 2) Fetch MES tasks
+    # 2) init fleet
+    fleet = AGV_Fleet(G, num_agvs)
+
+    # 3) initial MES tasks
     if experiment_type == "static":
-        mes_tasks = generate_mes_tasks(
+        initial = generate_mes_tasks(
             num_tasks=num_agvs,
-            valid_nodes=valid_nodes,
-            warehouse_graph=warehouse_graph,
+            valid_nodes=list(G.nodes),
+            warehouse_graph=G,
             seed=seed
         )
     else:
-        mes_tasks = fetch_dynamic_tasks(
+        initial = fetch_dynamic_tasks(
             current_workload=num_agvs,
-            warehouse_graph=warehouse_graph,
+            warehouse_graph=G,
             seed=seed
         )
 
-    # 3) Fetch TMS routes
-    tms_routes = fetch_real_time_routes(
-        warehouse_graph,
-        mes_workload=num_agvs,
-        num_routes=num_agvs
-    )
+    tasks = []
+    for t in initial:
+        if isinstance(t, dict):
+            tasks.append((t["start_node"], t["end_node"], t.get("task_id")))
+        else:
+            tasks.append((t[0], t[1], None))
+    fleet.assign_tasks(tasks)
 
-    # 4) Initialize AGV fleet state
-    agvs = []
-    for i in range(num_agvs):
-        agvs.append({
-            "id": i,
-            "position": random.choice(valid_nodes),
-            "battery": 100.0,
-            "task": None,
-            "charging": False,
-            "move_count": 0,
-            "energy_consumed": 0.0,
-            "completed_tasks": 0,
-            "reroute_count": 0,
-            "waiting_cycles": 0
-        })
-
-    # 5) Main simulation loop
+    # 4) main simulation loop
+    tms_routes = None
     for cycle in range(num_cycles):
-        for agv in agvs:
-            # Recharge if at charging station
-            if agv["charging"]:
-                agv["battery"] = min(100.0, agv["battery"] + 10.0)
-                if agv["battery"] >= 100.0:
-                    agv["charging"] = False
-                continue
+        # if exporting, reassign all AGVs each cycle
+        if export_movements:
+            batch = generate_mes_tasks(
+                num_tasks=num_agvs,
+                valid_nodes=list(G.nodes),
+                warehouse_graph=G,
+                seed=seed + cycle
+            )
+            tasks = [
+                (t["start_node"], t["end_node"], t.get("task_id")) if isinstance(t, dict)
+                else (t[0], t[1], None)
+                for t in batch
+            ]
+            fleet.assign_tasks(tasks)
 
-            # Assign new task if none
-            if agv["task"] is None:
-                if experiment_type == "static":
-                    start, end = random.sample(valid_nodes, 2)
+        # normal dynamic mode (non-static & not exporting)
+        elif experiment_type != "static":
+            dt = fetch_dynamic_tasks(
+                current_workload=num_agvs,
+                warehouse_graph=G,
+                seed=seed + cycle
+            )
+            new_tasks = []
+            for t in dt:
+                if isinstance(t, dict):
+                    new_tasks.append((t["start_node"], t["end_node"], t.get("task_id")))
                 else:
-                    dt = fetch_dynamic_tasks(
-                        current_workload=num_agvs,
-                        warehouse_graph=warehouse_graph,
-                        seed=seed + cycle + agv["id"]
-                    )
-                    t0 = dt[0]
-                    start = t0[0] if isinstance(t0, tuple) else t0["start_node"]
-                    end   = t0[1] if isinstance(t0, tuple) else t0["end_node"]
-                agv["task"] = (start, end)
+                    new_tasks.append((t[0], t[1], None))
+            fleet.assign_tasks(new_tasks)
 
-            # Execute current task
-            start, end = agv["task"]
-            if agv["position"] != end:
-                try:
-                    path = nx.shortest_path(
-                        warehouse_graph,
-                        source=agv["position"],
-                        target=end,
-                        weight="weight"
-                    )
-                    if len(path) > 1:
-                        next_pos = path[1]
-                        cost = compute_energy_cost(
-                            warehouse_graph,
-                            agv["position"],
-                            next_pos
-                        )
-                        # Update AGV state
-                        agv["position"] = next_pos
-                        agv["move_count"] += 1
-                        agv["energy_consumed"] += cost
-                        agv["battery"] = max(0.0, agv["battery"] - cost)
-                        update_congestion(warehouse_graph, next_pos)
-                    else:
-                        agv["waiting_cycles"] += 1
-                except nx.NetworkXNoPath:
-                    agv["reroute_count"] += 1
-                    agv["task"] = None
-            else:
-                # Task completed
-                agv["completed_tasks"] += 1
-                agv["task"] = None
-                update_congestion(warehouse_graph, agv["position"])
+        # fetch TMS routes
+        tms_routes = fetch_real_time_routes(
+            warehouse_graph=G,
+            mes_workload=num_agvs,
+            num_routes=num_agvs
+        )
 
-            # If battery low, go to charging station
-            if agv["battery"] < 20.0:
-                stations = [n for n in valid_nodes if warehouse_graph.nodes[n].get("type") == "charging_station"]
-                if stations:
-                    try:
-                        nearest = min(
-                            stations,
-                            key=lambda s: nx.shortest_path_length(
-                                warehouse_graph,
-                                source=agv["position"],
-                                target=s,
-                                weight="weight"
-                            )
-                        )
-                        agv["position"] = nearest
-                        agv["charging"] = True
-                    except nx.NetworkXNoPath:
-                        pass
+        # real-time adaptation & urgency updates
+        adapt_to_real_time_conditions(G, cycle, seed + cycle)
+        update_edge_urgency(G, fleet)
 
-        # Decay congestion globally
-        decay_congestion(warehouse_graph)
+        # choose path algorithm
+        if experiment_type == "obstacle":
+            algo = nx.astar_path
+        elif experiment_type == "scalability":
+            algo = nx.dijkstra_path
+        else:
+            algo = nx.shortest_path
+
+        # move AGVs
+        fleet.move_fleet(
+            path_algorithm=algo,
+            current_cycle=cycle,
+            current_workload=num_agvs,
+            current_route=tms_routes
+        )
+
+        # decay congestion
+        decay_congestion(G)
+
+    # 5) export movements
+    if export_movements:
+        all_moves = []
+        for agv in fleet.agvs:
+            all_moves.extend(agv.move_history)
+        df = pd.DataFrame(all_moves)
+        df.to_csv(export_path, index=False)
+        print(f"[INFO] Exported {len(df)} movements to {export_path}")
 
     return {
-        "warehouse_graph": warehouse_graph,
-        "mes_tasks": mes_tasks,
-        "tms_routes": tms_routes,
-        "agvs": agvs
+        "warehouse_graph": G,
+        "mes_tasks":       initial,
+        "tms_routes":      tms_routes,
+        "agv_fleet":       fleet
     }
