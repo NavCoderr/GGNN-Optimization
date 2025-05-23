@@ -4,14 +4,16 @@ from loguru import logger
 from modules.congestion_management import get_congestion_level
 from modules.energy_optimization import compute_energy_cost
 
-def astar_path(G: nx.DiGraph, start: int, goal: int) -> list:
+def astar_path(G: nx.Graph, start: int, goal: int) -> list:
+    
     def heuristic(u: int, v: int) -> float:
+        # admissible heuristic: 0.8 × shortest‐path distance by weight
         try:
             return nx.shortest_path_length(G, u, v, weight='weight') * 0.8
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return float('inf')
 
-    if start not in G or goal not in G:
+    if start not in G.nodes or goal not in G.nodes:
         logger.error(f"Invalid start/goal for A*: {start}, {goal}")
         return []
 
@@ -19,29 +21,37 @@ def astar_path(G: nx.DiGraph, start: int, goal: int) -> list:
     came_from = {}
     g_score = {n: float('inf') for n in G.nodes}
     g_score[start] = 0.0
+    visited = set()
 
     while open_set:
-        _, current = heapq.heappop(open_set)
+        f_current, current = heapq.heappop(open_set)
         if current == goal:
-            path = []
+            # reconstruct path
+            path = [current]
             while current in came_from:
-                path.append(current)
                 current = came_from[current]
-            path.append(start)
+                path.append(current)
             return path[::-1]
 
-        for nbr in G.neighbors(current):
-            base = G[current][nbr].get('weight', 1.0)
-            penalty = get_congestion_level(G, nbr) * 5.0
-            energy = compute_energy_cost(G, current, nbr)
-            cost = base + penalty + energy
-            tentative = g_score[current] + cost
+        if current in visited:
+            continue
+        visited.add(current)
 
-            if tentative < g_score[nbr]:
+        for nbr in G.neighbors(current):
+            # base travel cost
+            w = G.edges[current, nbr].get('weight', 1.0)
+            # congestion penalty on this edge
+            penalty = get_congestion_level(G, current, nbr) * 5.0
+            # energy cost to traverse
+            energy = compute_energy_cost(G, current, nbr)
+            step_cost = w + penalty + energy
+
+            tentative_g = g_score[current] + step_cost
+            if tentative_g < g_score[nbr]:
                 came_from[nbr] = current
-                g_score[nbr] = tentative
-                f = tentative + heuristic(nbr, goal)
-                heapq.heappush(open_set, (f, nbr))
+                g_score[nbr] = tentative_g
+                f_score = tentative_g + heuristic(nbr, goal)
+                heapq.heappush(open_set, (f_score, nbr))
 
     logger.error(f"A* failed to find a path from {start} to {goal}")
     return []
