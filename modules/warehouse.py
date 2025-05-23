@@ -10,13 +10,7 @@ def create_warehouse_graph(
     num_edges=2000,
     seed=None
 ):
-    """
-    Build a directed warehouse graph with:
-      - random node positions (x,y) in [0,100]²
-      - node attributes: pos, congestion=0.0, task_priority, type
-      - num_edges randomly connected edges with physical lengths
-      - charging stations, rest stations, and obstacle nodes
-    """
+    
     if seed is not None:
         random.seed(seed)
 
@@ -52,10 +46,7 @@ def create_warehouse_graph(
 
 
 def _connect_nodes(G: nx.DiGraph, num_nodes: int, num_edges: int) -> None:
-    """
-    Add num_edges random directed edges. Then ensure every node
-    has at least one in-edge and one out-edge, and the graph is strongly connected.
-    """
+     
     def add_edge(u: int, v: int):
         pos_u = G.nodes[u]['pos']
         pos_v = G.nodes[v]['pos']
@@ -98,10 +89,7 @@ def _connect_nodes(G: nx.DiGraph, num_nodes: int, num_edges: int) -> None:
 
 
 def _place_obstacles(G: nx.DiGraph, num_obstacles: int) -> None:
-    """
-    Randomly mark up to num_obstacles nodes as 'obstacle', but revert
-    if that breaks strong connectivity.
-    """
+     
     candidates = [n for n, d in G.nodes(data=True) if d['type'] == 'normal']
     random.shuffle(candidates)
     placed = 0
