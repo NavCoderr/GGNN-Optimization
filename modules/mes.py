@@ -3,15 +3,7 @@ from loguru import logger
 import networkx as nx
 
 def generate_mes_tasks(num_tasks=100, valid_nodes=None, warehouse_graph=None, seed=None):
-    """
-    Generate a batch of MES tasks with unique IDs, priority, and processing times.
-    Returns a list of dicts, each with:
-      - task_id: int
-      - start_node: node id
-      - end_node: node id
-      - priority: "low" | "medium" | "high"
-      - processing_time: float (seconds)
-    """
+    
     if seed is not None:
         random.seed(seed)
 
@@ -53,10 +45,7 @@ def generate_mes_tasks(num_tasks=100, valid_nodes=None, warehouse_graph=None, se
 
 
 def fetch_dynamic_tasks(current_workload, warehouse_graph, base_tasks=5, seed=None):
-    """
-    Fetch a new batch of MES tasks based on current workload.
-    Returns a list of task dicts (same format as generate_mes_tasks).
-    """
+    
     if seed is not None:
         random.seed(seed)
 
